@@ -1,14 +1,17 @@
 """
 BrightData Proxy Test - Install Bright Data CA + Selenium-Wire CA (idempotent) + Headless Verification
 
+Run modes:
+- In AWS ECS/Fargate: inject certs via SSM -> env vars:
+    BRIGHTDATA_CA_B64           (base64 of PEM)  OR BRIGHTDATA_CA_PEM (raw PEM)
+    SELENIUMWIRE_CA_B64         (base64 of PEM)  OR SELENIUMWIRE_CA_PEM (raw PEM)
+  Task still needs BRIGHTDATA_PROXY from SSM.
+
+- Locally: place 'brightdata_ca.crt' next to this script (optional for Selenium-Wire;
+  it can be extracted automatically if not provided via env).
+
 Requirements:
   pip install python-dotenv selenium-wire undetected-chromedriver
-
-.env must include:
-  BRIGHTDATA_PROXY=http://user:pass@brd.superproxy.io:33335
-
-Place Bright Data CA file next to this script as:
-  brightdata_ca.crt
 """
 
 import os
@@ -26,8 +29,9 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from seleniumwire import webdriver
-    import undetected_chromedriver as uc
+    # Use selenium-wire + undetected-chromedriver
+    # We import uc directly and pass seleniumwire_options into uc.Chrome()
+    import undetected_chromedriver as uc  # type: ignore
 except ImportError as e:
     print(f"[ERROR] Import failed: {e}")
     import traceback
@@ -39,7 +43,7 @@ load_dotenv()
 # ---------- Config ----------
 SCRIPT_DIR = Path(__file__).resolve().parent
 BD_CERT_FILE = SCRIPT_DIR / "brightdata_ca.crt"
-SW_CERT_FILE = SCRIPT_DIR / "seleniumwire_ca.crt"  # we'll extract or copy here
+SW_CERT_FILE = SCRIPT_DIR / "seleniumwire_ca.crt"  # will be written from env or extracted
 PROFILE_DIR = SCRIPT_DIR / "chrome_profile_brightdata"
 
 EXPECTED_BD_CA_NAME = "Bright Data"
@@ -54,11 +58,55 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+def sha256sum(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_cert_from_env(path: Path, b64_env: str, pem_env: str, label: str) -> bool:
+    """
+    If 'path' doesn't exist, try to create it from base64 or raw-PEM env vars.
+    Returns True if we wrote the file.
+    """
+    if path.exists():
+        return False
+    b64 = os.getenv(b64_env)
+    pem = os.getenv(pem_env)
+    if b64:
+        import base64
+        try:
+            path.write_bytes(base64.b64decode(b64))
+            print(f"[INFO] Wrote {label} from {b64_env} to: {path}")
+            return True
+        except Exception as e:
+            print(f"[WARN] Failed to decode {b64_env}: {e}")
+    if pem:
+        try:
+            path.write_text(pem, encoding="utf-8")
+            print(f"[INFO] Wrote {label} from {pem_env} to: {path}")
+            return True
+        except Exception as e:
+            print(f"[WARN] Failed to write {pem_env}: {e}")
+    return False
+
+
 # ---------- Local CA presence ----------
 def ensure_local_bd_ca():
+    """
+    Ensure Bright Data CA file exists. Prefer env -> file; otherwise require local file.
+    """
+    wrote = write_cert_from_env(
+        BD_CERT_FILE, "BRIGHTDATA_CA_B64", "BRIGHTDATA_CA_PEM", "Bright Data CA"
+    )
     if not BD_CERT_FILE.exists():
-        die(f"Bright Data CA not found next to script: {BD_CERT_FILE}")
-    print(f"[INFO] Found Bright Data CA: {BD_CERT_FILE}")
+        die(f"Bright Data CA not found (env or file). Expect either BRIGHTDATA_CA_B64/PEM or file: {BD_CERT_FILE}")
+    if wrote:
+        print(f"[INFO] Found Bright Data CA (from env): {BD_CERT_FILE}")
+    else:
+        print(f"[INFO] Found Bright Data CA: {BD_CERT_FILE}")
 
 
 # ---------- OS helpers ----------
@@ -72,20 +120,26 @@ def is_linux():   return platform.system().lower() == "linux"
 def nss_list() -> str:
     nssdb = os.path.expanduser("~/.pki/nssdb")
     try:
-        return subprocess.check_output(["certutil", "-d", f"sql:{nssdb}", "-L"],
-                                       stderr=subprocess.DEVNULL).decode("utf-8", "ignore")
+        return subprocess.check_output(
+            ["certutil", "-d", f"sql:{nssdb}", "-L"],
+            stderr=subprocess.DEVNULL
+        ).decode("utf-8", "ignore")
     except Exception:
         return ""
+
 
 def nss_add(nickname: str, crt_path: Path):
     nssdb = os.path.expanduser("~/.pki/nssdb")
     os.makedirs(nssdb, exist_ok=True)
     try:
-        subprocess.run(["certutil", "-d", f"sql:{nssdb}", "-A",
-                        "-t", "C,,", "-n", nickname, "-i", str(crt_path)],
-                       check=True)
+        subprocess.run(
+            ["certutil", "-d", f"sql:{nssdb}", "-A",
+             "-t", "C,,", "-n", nickname, "-i", str(crt_path)],
+            check=True
+        )
     except FileNotFoundError:
         die("certutil (libnss3-tools) not found. Install it (e.g., sudo apt-get install libnss3-tools).")
+
 
 # macOS (System keychain; needs sudo once)
 def macos_has_cert(name_substr: str) -> bool:
@@ -98,10 +152,14 @@ def macos_has_cert(name_substr: str) -> bool:
     except Exception:
         return False
 
+
 def macos_add_cert(crt_path: Path):
-    subprocess.run(["sudo", "security", "add-trusted-cert", "-d",
-                    "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain", str(crt_path)],
-                   check=True)
+    subprocess.run(
+        ["sudo", "security", "add-trusted-cert", "-d",
+         "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain", str(crt_path)],
+        check=True
+    )
+
 
 # Windows (CurrentUser Root; no admin needed)
 def win_store_contains(name_substr: str) -> bool:
@@ -114,11 +172,13 @@ def win_store_contains(name_substr: str) -> bool:
     except Exception:
         return False
 
+
 def win_add_cert_user(crt_path: Path):
     subprocess.run(
         ["certutil", "-user", "-addstore", "-f", "Root", str(crt_path)],
         check=True, shell=True
     )
+
 
 # Bright Data CA install
 def install_bd_ca_idempotent():
@@ -143,26 +203,34 @@ def install_bd_ca_idempotent():
     else:
         die("Unsupported OS for Bright Data CA install.")
 
-# Selenium-Wire CA: extract and install
+
+# Selenium-Wire CA: prefer env; else extract; then install
 def ensure_sw_ca_file():
+    wrote = write_cert_from_env(
+        SW_CERT_FILE, "SELENIUMWIRE_CA_B64", "SELENIUMWIRE_CA_PEM", "Selenium-Wire CA"
+    )
     if SW_CERT_FILE.exists():
-        print(f"[INFO] Selenium-Wire CA present: {SW_CERT_FILE}")
+        if wrote:
+            print(f"[INFO] Selenium-Wire CA present (from env): {SW_CERT_FILE}")
+        else:
+            print(f"[INFO] Selenium-Wire CA present: {SW_CERT_FILE}")
         return
-    # Try CLI extractor; most versions write 'ca.crt' in CWD
+
+    # Fallback: extract from selenium-wire
     print("[INFO] Extracting Selenium-Wire CA...")
     try:
         subprocess.run([sys.executable, "-m", "seleniumwire", "extractcert"],
                        check=True, cwd=str(SCRIPT_DIR))
     except subprocess.CalledProcessError as e:
         die(f"Failed to extract Selenium-Wire CA: {e}")
-    # Move/rename if necessary
+
     ca_in_cwd = SCRIPT_DIR / "ca.crt"
     if ca_in_cwd.exists():
         ca_in_cwd.replace(SW_CERT_FILE)
         print(f"[INFO] Saved Selenium-Wire CA to: {SW_CERT_FILE}")
     else:
-        # Some versions may already place a file named differently; fallback:
         die("Could not find extracted Selenium-Wire CA (expected 'ca.crt').")
+
 
 def install_sw_ca_idempotent():
     if is_linux():
@@ -187,103 +255,10 @@ def install_sw_ca_idempotent():
         die("Unsupported OS for Selenium-Wire CA install.")
 
 
-# ---------- Verification helpers ----------
-def try_openssl():
-    try:
-        subprocess.check_output(["openssl", "version"], stderr=subprocess.DEVNULL)
-        return True
-    except Exception:
-        return False
-
-def parse_chain_with_openssl(der_bytes: bytes) -> str:
-    from tempfile import NamedTemporaryFile
-    with NamedTemporaryFile(delete=False) as tf:
-        tf.write(der_bytes)
-        tmp = tf.name
-    try:
-        subject = subprocess.check_output(
-            ["openssl", "x509", "-inform", "DER", "-noout", "-subject", "-in", tmp],
-            stderr=subprocess.DEVNULL
-        ).decode("utf-8", "ignore").strip()
-        issuer = subprocess.check_output(
-            ["openssl", "x509", "-inform", "DER", "-noout", "-issuer", "-in", tmp],
-            stderr=subprocess.DEVNULL
-        ).decode("utf-8", "ignore").strip()
-        return f"{subject} | {issuer}"
-    finally:
-        try: os.remove(tmp)
-        except Exception: pass
-
-
-def verify_certificate_chain(driver, expected_substrs):
-    """Best-effort: print chain; return True if any expected substrings appear."""
-    import base64
-    try:
-        try:
-            driver.execute_cdp_cmd("Security.enable", {})
-        except Exception:
-            pass
-        res = driver.execute_cdp_cmd("Security.getCertificate", {"origin": driver.current_url})
-        if isinstance(res, dict) and "certificates" in res:
-            certs = res["certificates"]
-        elif isinstance(res, dict) and "tableNames" in res:
-            certs = res["tableNames"]
-        elif isinstance(res, list):
-            certs = res
-        else:
-            certs = []
-
-        if not certs:
-            print("[WARN] Could not retrieve certificate chain from DevTools.")
-            return False
-
-        print("[INFO] Certificate chain entries:", len(certs))
-        found = False
-        if try_openssl():
-            for idx, c in enumerate(certs, start=1):
-                # Handle PEM or base64 DER
-                if "BEGIN CERTIFICATE" in c:
-                    from tempfile import NamedTemporaryFile
-                    with NamedTemporaryFile("w", delete=False) as tf:
-                        tf.write(c)
-                        pem_path = tf.name
-                    try:
-                        subject = subprocess.check_output(
-                            ["openssl", "x509", "-inform", "PEM", "-noout", "-subject", "-in", pem_path],
-                            stderr=subprocess.DEVNULL
-                        ).decode("utf-8", "ignore").strip()
-                        issuer = subprocess.check_output(
-                            ["openssl", "x509", "-inform", "PEM", "-noout", "-issuer", "-in", pem_path],
-                            stderr=subprocess.DEVNULL
-                        ).decode("utf-8", "ignore").strip()
-                        line = f"{subject} | {issuer}"
-                        print(f"  [{idx}] {line}")
-                        if any(s.lower() in line.lower() for s in expected_substrs):
-                            found = True
-                    finally:
-                        try: os.remove(pem_path)
-                        except Exception: pass
-                else:
-                    try:
-                        der = base64.b64decode(c)
-                        info = parse_chain_with_openssl(der)
-                        print(f"  [{idx}] {info}")
-                        if any(s.lower() in info.lower() for s in expected_substrs):
-                            found = True
-                    except Exception as e:
-                        print(f"  [{idx}] (unable to parse cert): {e}")
-        else:
-            print("[WARN] OpenSSL not found; skipping issuer/subject parsing.")
-        return found
-    except Exception as e:
-        print(f"[ERROR] Certificate chain check failed: {e}")
-        return False
-
-
 # ---------- Main proxy test ----------
 def run_test(headless: bool = True):
     if not BRIGHTDATA_PROXY:
-        die("BRIGHTDATA_PROXY not set in .env")
+        die("BRIGHTDATA_PROXY not set (in .env locally or injected via ECS task secrets)")
 
     seleniumwire_options = {
         "proxy": {
@@ -322,13 +297,6 @@ def run_test(headless: bool = True):
     driver.get("https://www.google.com")
     print(f"[INFO] Navigated to: {driver.current_url}")
 
-    # 3) Chrome should mark the page 'secure'
-    try:
-        driver.execute_cdp_cmd("Security.enable", {})
-    except Exception:
-        pass
-    # --- replace the current "secure" check block in run_test(...) with this ---
-
     # 3) Quick signals from the page
     proto = driver.execute_script("return location.protocol")
     is_secure_ctx = driver.execute_script("return window.isSecureContext === true")
@@ -362,13 +330,12 @@ def run_test(headless: bool = True):
     print("[RESULT] ✅ Proxy + CA trust validated (HTTPS secure context + cross-origin fetch succeeded).")
 
 
-
 if __name__ == "__main__":
-    # Ensure CA files
+    # Ensure CA files exist (prefer env → file)
     ensure_local_bd_ca()
     ensure_sw_ca_file()
 
-    # Install to system/user trust stores (idempotent)
+    # Install into system/user trust stores (idempotent)
     install_bd_ca_idempotent()
     install_sw_ca_idempotent()
 

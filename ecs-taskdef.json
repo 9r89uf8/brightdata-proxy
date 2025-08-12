@@ -24,6 +24,10 @@
         {
           "name": "BRIGHTDATA_PROXY",
           "valueFrom": "arn:aws:ssm:us-east-2:563561751769:parameter/brightdata/proxy"
+        },
+        {
+          "name": "BRIGHTDATA_CA_B64",
+          "valueFrom": "arn:aws:ssm:us-east-2:563561751769:parameter/brightdata/ca_b64"
         }
       ],
       "environment": [

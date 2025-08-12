@@ -12,7 +12,7 @@ WORKDIR /app
 # Copy all necessary files
 COPY requirements.txt ./requirements.txt
 COPY brightdata_proxy_headless.py ./brightdata_proxy_headless.py
-COPY brightdata_ca.crt ./brightdata_ca.crt
+
 
 # Install from requirements.txt with specific versions
 RUN pip install --no-cache-dir -r requirements.txt
