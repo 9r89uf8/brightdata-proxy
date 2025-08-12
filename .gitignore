@@ -6,6 +6,7 @@
 
 
 
+
 # Security files - certificates and keys
 *.key
 *.pem
