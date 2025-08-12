@@ -26,9 +26,12 @@ except ImportError:
     sys.exit(1)
 
 try:
-    import seleniumwire.undetected_chromedriver as uc
-except ImportError:
-    print("[ERROR] Install: pip install selenium-wire undetected-chromedriver")
+    from seleniumwire import webdriver
+    import undetected_chromedriver as uc
+except ImportError as e:
+    print(f"[ERROR] Import failed: {e}")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 
 load_dotenv()
