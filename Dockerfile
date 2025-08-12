@@ -9,10 +9,13 @@ ENV CHROME_BIN=/usr/bin/chromium
 ENV UCGUI=0
 
 WORKDIR /app
+# Copy all necessary files
+COPY requirements.txt ./requirements.txt
 COPY brightdata_proxy_headless.py ./brightdata_proxy_headless.py
 COPY brightdata_ca.crt ./brightdata_ca.crt
 
-RUN pip install --no-cache-dir selenium-wire undetected-chromedriver python-dotenv
+# Install from requirements.txt with specific versions
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Non-root user
 RUN useradd -m appuser
