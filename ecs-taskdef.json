@@ -4,8 +4,8 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
   "memory": "1024",
-  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/brightdataTaskRole",
+  "executionRoleArn": "arn:aws:iam::563561751769:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::563561751769:role/brightdataTaskRole",
   "containerDefinitions": [
     {
       "name": "brightdata-proxy",
@@ -15,7 +15,7 @@
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-region": "<AWS_REGION>",
+          "awslogs-region": "us-east-2",
           "awslogs-group": "/ecs/brightdata-proxy",
           "awslogs-stream-prefix": "ecs"
         }
@@ -23,7 +23,7 @@
       "secrets": [
         {
           "name": "BRIGHTDATA_PROXY",
-          "valueFrom": "arn:aws:ssm:<AWS_REGION>:<ACCOUNT_ID>:parameter/brightdata/proxy"
+          "valueFrom": "arn:aws:ssm:us-east-2:563561751769:parameter/brightdata/proxy"
         }
       ],
       "environment": [
