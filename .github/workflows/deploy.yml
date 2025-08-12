@@ -1,29 +1,23 @@
-name: Build & Deploy to ECS (Fargate)
-
+name: Build & Register Task Definition (Fargate on-demand)
 on:
   push:
     branches: [ "main" ]
-
 permissions:
-  id-token: write    # for OIDC
+  id-token: write
   contents: read
-
 env:
   AWS_REGION: us-east-2
   ECR_REPOSITORY: brightdata-proxy
-  ECS_CLUSTER: brightdata-cluster
-  ECS_SERVICE: brightdata-proxy-svc
+  TASKDEF_FILE: ecs-taskdef.json
   CONTAINER_NAME: brightdata-proxy
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
@@ -32,40 +26,34 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Ensure ECR repository exists
+      - name: Ensure ECR repo exists
         run: |
-          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null 2>&1 \
-          || aws ecr create-repository \
-               --repository-name "$ECR_REPOSITORY" \
-               --image-scanning-configuration scanOnPush=true \
-               --region "$AWS_REGION"
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null 2>&1 || aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true --region "$AWS_REGION"
 
       - name: Build, tag, and push image
         id: build-image
         run: |
           IMAGE_TAG=${GITHUB_SHA::7}
-          ECR_URI=$(aws ecr describe-repositories \
-            --repository-names "$ECR_REPOSITORY" \
-            --region "$AWS_REGION" \
-            --query 'repositories[0].repositoryUri' \
-            --output text)
+          ECR_URI=$(aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" --query 'repositories[0].repositoryUri' --output text)
           echo "Using ECR: $ECR_URI"
           docker build -t "$ECR_URI:$IMAGE_TAG" .
           docker push "$ECR_URI:$IMAGE_TAG"
           echo "image=$ECR_URI:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Render task definition
+      - name: Render task definition with new image
         id: render
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: ecs-taskdef.json
+          task-definition: ${{ env.TASKDEF_FILE }}
           container-name: ${{ env.CONTAINER_NAME }}
           image: ${{ steps.build-image.outputs.image }}
 
-      - name: Deploy to Amazon ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.render.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
+      - name: Register new task definition revision
+        id: register
+        run: |
+          TD_PATH="${{ steps.render.outputs.task-definition }}"
+          ARN=$(aws ecs register-task-definition --cli-input-json "file://$TD_PATH" --query 'taskDefinition.taskDefinitionArn' --output text --region "$AWS_REGION")
+          echo "taskdef_arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Output latest task definition ARN
+        run: echo "Registered ${{ steps.register.outputs.taskdef_arn }}"

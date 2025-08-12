@@ -28,8 +28,8 @@
       ],
       "environment": [
         { "name": "PYTHONUNBUFFERED", "value": "1" }
-      ],
-      "portMappings": []
+      ]
     }
   ]
 }
+

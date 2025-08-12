@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: On-demand HTTP endpoint to run an ECS Fargate task (BrightData job)
+
+Parameters:
+  ClusterName:
+    Type: String
+    Description: ECS cluster name (e.g., brightdata-cluster)
+  TaskDefinitionFamily:
+    Type: String
+    Description: ECS Task Definition family name (e.g., brightdata-proxy-task)
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the Fargate task (comma-separated)
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security groups for the Fargate task (comma-separated)
+  AssignPublicIp:
+    Type: String
+    AllowedValues: [ ENABLED, DISABLED ]
+    Default: ENABLED
+    Description: Whether to assign a public IP to the Fargate task
+  RunToken:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Optional shared secret for calling the API (sent as x-run-token header)
+  TaskExecutionRoleArn:
+    Type: String
+    Description: ARN of ecsTaskExecutionRole used by the Task Definition
+  TaskRoleArn:
+    Type: String
+    Description: ARN of the task role (the role your container runs as)
+
+Resources:
+  # CloudWatch log group for the Lambda
+  RunTaskLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/run-brightdata-task
+      RetentionInDays: 14
+
+  # Lambda execution role
+  RunTaskLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub run-brightdata-task-role-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: run-brightdata-task-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Allow running ONLY the specified task definition family in this account/region
+              - Sid: RunSpecificTaskDef
+                Effect: Allow
+                Action: ecs:RunTask
+                Resource:
+                  - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${TaskDefinitionFamily}:*
+              # Pass the task execution role and the task role referenced by the task definition
+              - Sid: PassTaskRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Ref TaskExecutionRoleArn
+                  - !Ref TaskRoleArn
+              # Basic describe for diagnostics (wildcard OK)
+              - Sid: DescribeForDiagnostics
+                Effect: Allow
+                Action:
+                  - ecs:DescribeTaskDefinition
+                  - ecs:DescribeTasks
+                Resource: "*"
+              # Lambda logging
+              - Sid: LambdaLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  # Lambda function that calls ECS RunTask
+  RunTaskLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub run-brightdata-task-${AWS::StackName}
+      Runtime: python3.11
+      Role: !GetAtt RunTaskLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Handler: index.handler
+      Environment:
+        Variables:
+          CLUSTER: !Ref ClusterName
+          TASK_DEF: !Ref TaskDefinitionFamily
+          # Comma-join these lists so the function can split them
+          SUBNETS: !Join [ ",", !Ref SubnetIds ]
+          SGS: !Join [ ",", !Ref SecurityGroupIds ]
+          ASSIGN_PUBLIC_IP: !Ref AssignPublicIp
+          RUN_TOKEN: !Ref RunToken
+      Code:
+        ZipFile: !Sub |
+          import os, json, boto3
+          ecs = boto3.client("ecs")
+          CLUSTER = os.environ["CLUSTER"]
+          TASK_DEF = os.environ["TASK_DEF"]
+          SUBNETS = os.environ["SUBNETS"].split(",")
+          SGS = os.environ["SGS"].split(",")
+          ASSIGN_PUBLIC_IP = os.environ.get("ASSIGN_PUBLIC_IP","ENABLED")
+          RUN_TOKEN = os.environ.get("RUN_TOKEN","")
+          def _json(status, body):
+              return {
+                  "statusCode": status,
+                  "headers": {
+                      "content-type": "application/json",
+                      "access-control-allow-origin": "*",
+                      "access-control-allow-methods": "POST,OPTIONS"
+                  },
+                  "body": json.dumps(body)
+              }
+          def handler(event, context):
+              # CORS preflight
+              if (event.get("requestContext",{}).get("http",{}).get("method") == "OPTIONS"):
+                  return _json(200, {"ok": True})
+              # Simple token check (if configured)
+              if RUN_TOKEN:
+                  headers = event.get("headers") or {}
+                  if headers.get("x-run-token") != RUN_TOKEN:
+                      return _json(401, {"error": "unauthorized"})
+              params = event.get("queryStringParameters") or {}
+              public_ip = params.get("publicIp", ASSIGN_PUBLIC_IP)
+              try:
+                  count = int(params.get("count","1"))
+              except:
+                  count = 1
+              if count < 1 or count > 10:
+                  return _json(400, {"error":"count must be 1..10"})
+              try:
+                  resp = ecs.run_task(
+                      cluster=CLUSTER,
+                      launchType="FARGATE",
+                      taskDefinition=TASK_DEF,
+                      count=count,
+                      networkConfiguration={
+                          "awsvpcConfiguration": {
+                              "subnets": SUBNETS,
+                              "securityGroups": SGS,
+                              "assignPublicIp": public_ip
+                          }
+                      }
+                  )
+                  tasks = [{"taskArn": t.get("taskArn"), "lastStatus": t.get("lastStatus")} for t in resp.get("tasks",[])]
+                  failures = resp.get("failures",[])
+                  status = 200 if tasks else 500
+                  return _json(status, {"tasks": tasks, "failures": failures})
+              except Exception as e:
+                  return _json(500, {"error": str(e)})
+
+  # HTTP API (API Gateway v2)
+  RunTaskApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub brightdata-run-api-${AWS::StackName}
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: ["POST","OPTIONS"]
+        AllowHeaders: ["*"]
+
+  # Lambda integration
+  RunTaskApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref RunTaskApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt RunTaskLambda.Arn
+      PayloadFormatVersion: "2.0"
+
+  # Route: POST /run
+  RunTaskApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref RunTaskApi
+      RouteKey: "POST /run"
+      Target: !Sub integrations/${RunTaskApiIntegration}
+
+  # Auto-deployed stage
+  RunTaskApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref RunTaskApi
+      StageName: prod
+      AutoDeploy: true
+
+  # Allow API Gateway to invoke the Lambda
+  RunTaskLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RunTaskLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RunTaskApi}/*/POST/run
+
+Outputs:
+  InvokeUrl:
+    Description: Invoke URL for POST /run
+    Value: !Sub https://${RunTaskApi}.execute-api.${AWS::Region}.amazonaws.com/prod/run
