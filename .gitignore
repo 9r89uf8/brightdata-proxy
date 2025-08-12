@@ -4,6 +4,7 @@
 .env.local
 .env.*.local
 
+
 # Security files - certificates and keys
 *.key
 *.pem
