@@ -17,8 +17,9 @@ COPY brightdata_ca.crt ./brightdata_ca.crt
 # Install from requirements.txt with specific versions
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Non-root user
-RUN useradd -m appuser
+# Create non-root user and give them ownership of /app
+RUN useradd -m appuser && chown -R appuser:appuser /app
+
 USER appuser
 
 CMD ["python", "brightdata_proxy_headless.py"]
