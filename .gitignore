@@ -4,10 +4,8 @@
 .env.local
 .env.*.local
 
-
-
-
 # Security files - certificates and keys
+*.crt
 *.key
 *.pem
 *.p12

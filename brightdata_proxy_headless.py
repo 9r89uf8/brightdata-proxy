@@ -31,7 +31,7 @@ except ImportError:
 try:
     # Use selenium-wire + undetected-chromedriver
     # We import uc directly and pass seleniumwire_options into uc.Chrome()
-    import undetected_chromedriver as uc  # type: ignore
+    import seleniumwire.undetected_chromedriver as uc
 except ImportError as e:
     print(f"[ERROR] Import failed: {e}")
     import traceback
@@ -44,7 +44,9 @@ load_dotenv()
 SCRIPT_DIR = Path(__file__).resolve().parent
 BD_CERT_FILE = SCRIPT_DIR / "brightdata_ca.crt"
 SW_CERT_FILE = SCRIPT_DIR / "seleniumwire_ca.crt"  # will be written from env or extracted
-PROFILE_DIR = SCRIPT_DIR / "chrome_profile_brightdata"
+# Use a fresh profile directory to avoid cached connections
+import time
+PROFILE_DIR = SCRIPT_DIR / f"chrome_profile_brightdata_{int(time.time())}"
 
 EXPECTED_BD_CA_NAME = "Bright Data"
 EXPECTED_SW_CA_NAME = "Selenium Wire"
@@ -259,6 +261,9 @@ def install_sw_ca_idempotent():
 def run_test(headless: bool = True):
     if not BRIGHTDATA_PROXY:
         die("BRIGHTDATA_PROXY not set (in .env locally or injected via ECS task secrets)")
+    
+    print(f"[DEBUG] Using proxy: {BRIGHTDATA_PROXY}")
+    print(f"[DEBUG] Proxy host extracted from URL...")
 
     seleniumwire_options = {
         "proxy": {
@@ -268,8 +273,8 @@ def run_test(headless: bool = True):
         },
         # Upstream (Bright Data) verification off for Selenium-Wire's local proxy:
         "verify_ssl": False,
-        # We don't need request capture; but Selenium-Wire may still MITM without its CA installed:
-        "disable_capture": True,
+        # Enable capture to ensure proxy is properly used:
+        "disable_capture": False,
         "suppress_connection_errors": True,
     }
 
@@ -289,9 +294,14 @@ def run_test(headless: bool = True):
     )
 
     # 1) Confirm IP is proxied
+    print("\n" + "="*60)
+    print("[INFO] Checking if proxy is working...")
     driver.get("https://api.ipify.org?format=text")
     ip_addr = driver.find_element("tag name", "body").text.strip()
-    print(f"[SUCCESS] Proxy IP: {ip_addr}")
+    print(f"[PROXY CHECK] Current IP Address: {ip_addr}")
+    print(f"[PROXY CHECK] If this is your real IP, the proxy is NOT working!")
+    print(f"[PROXY CHECK] If this is a Bright Data IP, the proxy IS working!")
+    print("="*60 + "\n")
 
     # 2) Visit an HTTPS site
     driver.get("https://www.google.com")
@@ -326,8 +336,12 @@ def run_test(headless: bool = True):
         driver.quit()
         die("Secondary HTTPS fetch failed; likely a certificate issue on proxy/chain.")
 
-    driver.quit()
     print("[RESULT] ✅ Proxy + CA trust validated (HTTPS secure context + cross-origin fetch succeeded).")
+    print("[INFO] Browser is now at Google.com - keeping it open for interaction...")
+    
+    # Keep browser open for user interaction
+    input("Press Enter to close the browser...")
+    driver.quit()
 
 
 if __name__ == "__main__":
@@ -340,4 +354,4 @@ if __name__ == "__main__":
     install_sw_ca_idempotent()
 
     # Run the test
-    run_test(headless=True)
+    run_test(headless=False)
